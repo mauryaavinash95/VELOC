@@ -67,7 +67,7 @@ double doWork(int numprocs, int rank, int M, int nbLines, double *g, double *h) 
 
 int main(int argc, char *argv[]) {
     int rank, nbProcs, nbLines, i, M, arg;
-    double wtime, *h, *g, memSize, localerror, globalerror = 1;
+    double wtime, *h, *g, memSize, localerror, globalerror = 1, inner_time;
 
     if (argc < 3) {
 	printf("Usage: %s <mem_in_mb> <cfg_file>\n", argv[0]);
@@ -98,16 +98,22 @@ int main(int argc, char *argv[]) {
 	printf("Maximum number of iterations : %d \n", ITER_TIMES);
 
     wtime = MPI_Wtime();
+    inner_time = MPI_Wtime();
     i = 0;
     while(i < ITER_TIMES) {
         localerror = doWork(nbProcs, rank, M, nbLines, g, h);
-        if (((i % ITER_OUT) == 0) && (rank == 0))
-	    printf("Step : %d, error = %f\n", i, globalerror);
-        if ((i % REDUCE) == 0)
-	    MPI_Allreduce(&localerror, &globalerror, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-        if (globalerror < PRECISION)
-	    break;
-	i++;
+        if (((i % ITER_OUT) == 0) && (rank == 0)) {
+            printf("Step : %d, error = %f, localerror %f, time = %lf s\n", i, globalerror, localerror, MPI_Wtime()-inner_time);
+            inner_time = MPI_Wtime();
+        }
+        if ((i % REDUCE) == 0) {
+	        MPI_Allreduce(&localerror, &globalerror, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        }
+        if (globalerror < PRECISION) {
+            printf("Breaking due to error being less: %lf", globalerror);
+            break;
+        }
+	    i++;
     }
     if (rank == 0)
 	printf("Execution finished in %lf seconds.\n", MPI_Wtime() - wtime);

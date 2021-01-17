@@ -1,5 +1,6 @@
 # Comment as needed to reduce build time
 add_executable (heatdis_original heatdis_original.c)
+# find_package(CUDA REQUIRED)
 add_executable (heatdis_mem heatdis_mem.c)
 add_executable (heatdis_file heatdis_file.c)
 add_executable (heatdis_fault heatdis_fault.cpp)
