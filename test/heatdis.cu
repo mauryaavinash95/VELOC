@@ -87,7 +87,6 @@ double doWork(int numprocs, int rank, int M, int nbLines, double *dg, double *dh
     MPI_Request req1[2], req2[2];
     MPI_Status status1[2], status2[2];
     long long int *localerror;
-    printf("Starting dowork...");
     checkCuda(cudaMallocHost((void**)&localerror, sizeof(long long int)));
     checkCuda(cudaMemcpyToSymbol(error_val, &localerror, sizeof(long long int), 0, cudaMemcpyHostToDevice));
     double *g, *h;
@@ -111,16 +110,15 @@ double doWork(int numprocs, int rank, int M, int nbLines, double *dg, double *dh
         MPI_Waitall(2,req2,status2);
     }
     compute<<<NUM_BLOCKS, NUM_THREADS>>>(nbLines, M, dg, dh);
-    // cudaDeviceSynchronize();
     if (rank == (numprocs-1)) {
         compute_right<<<NUM_BLOCKS, NUM_THREADS>>>(nbLines, M, dg);
     }
-    // cudaDeviceSynchronize();
-    // double t = MPI_Wtime();
+    cudaDeviceSynchronize();
+    double t = MPI_Wtime();
     checkCuda(cudaMemcpyFromSymbol(localerror, error_val, sizeof(long long int), 0, cudaMemcpyDeviceToHost));
     // printf("Time taken for MemcpyFromSymbol is: %lf\n", MPI_Wtime()-t);
-    free(h);
-    free(g);
+    cudaFreeHost(h);
+    cudaFreeHost(g);
     return *((double*)localerror);
 }
 
@@ -150,8 +148,8 @@ int main(int argc, char *argv[]) {
     nbLines = (M / nbProcs) + 3;
     
     double *dh, *dg;
-    cudaMalloc((void**)&dh, sizeof(double *) * M * nbLines);
-    cudaMalloc((void**)&dg, sizeof(double *) * M * nbLines);
+    checkCuda(cudaMalloc((void**)&dh, sizeof(double *) * M * nbLines));
+    checkCuda(cudaMalloc((void**)&dg, sizeof(double *) * M * nbLines));
     init_data_gpu<<<NUM_BLOCKS, NUM_THREADS>>>(nbLines, M, rank, dg);
     memSize = M * nbLines * 2 * sizeof(double) / (1024 * 1024);
 
@@ -161,15 +159,12 @@ int main(int argc, char *argv[]) {
 	    printf("Target precision : %f \n", PRECISION);
     if (rank == 0)
 	    printf("Maximum number of iterations : %d \n", ITER_TIMES);
-    printf("Initing wtime");
     wtime = MPI_Wtime();
     inner_time = MPI_Wtime();
     i = 0;
-    printf("Before veloc_mem_protect....");
     VELOC_Mem_protect(0, &i, 1, sizeof(int));
     VELOC_Mem_protect(1, dh, M * nbLines, sizeof(double));
     VELOC_Mem_protect(2, dg, M * nbLines, sizeof(double));
-    printf("After veloc_mem_protect....");
     while(i < ITER_TIMES) {
         localerror = doWork(nbProcs, rank, M, nbLines, dg, dh);
         if (((i % ITER_OUT) == 0) && (rank == 0)) {

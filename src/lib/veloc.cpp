@@ -1,6 +1,6 @@
 #include "include/veloc.h"
 #include "client.hpp"
-
+// #include <cuda_runtime.h>
 static veloc_client_t *veloc_client = NULL;
 
 #define __DEBUG
@@ -123,6 +123,21 @@ extern "C" int VELOC_Checkpoint(const char *name, int version) {
 	ret = VELOC_Checkpoint_end(1);
     return ret;
 }
+
+// extern "C" int VELOC_GPU_Async_Checkpoint(const char *name, int version, int mem_prot_id, void *d_ptr, void *h_ptr, size_t count, size_t base_size) {
+//     int ret = VELOC_Checkpoint_wait();
+//     int ids[] = {mem_prot_id};
+//     if (ret == VELOC_SUCCESS)
+//     cudaMemcpy(h_ptr, d_ptr, count*base_size, cudaMemcpyDeviceToHost);
+//     ret = VELOC_Mem_protect(mem_prot_id, h_ptr, count, base_size);
+//     if (ret == VELOC_SUCCESS)
+// 	ret = VELOC_Checkpoint_begin(name, version);
+//     if (ret == VELOC_SUCCESS)
+// 	ret = VELOC_Checkpoint_selective(VELOC_CKPT_SOME, ids, 1);
+//     if (ret == VELOC_SUCCESS)
+// 	ret = VELOC_Checkpoint_end(1);
+//     return ret;
+// }
 
 extern "C" int VELOC_Finalize(int drain) {
     if (veloc_client != NULL) {

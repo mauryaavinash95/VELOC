@@ -1,2 +1,3 @@
 # docs build directory
 docs/_build
+*/*.out

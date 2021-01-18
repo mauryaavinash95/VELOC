@@ -1,7 +1,6 @@
-add_library (veloc-client SHARED
+cuda_add_library(veloc-client SHARED
   veloc.cpp
-  client.cpp
-)
+  client.cu)
 
 # Link the executable to the necessary libraries.
 target_link_libraries (veloc-client veloc-modules ${COMM_QUEUE_LIBRARIES})
