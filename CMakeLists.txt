@@ -52,6 +52,10 @@ include_directories(${ER_INCLUDE_DIRS})
 # PDSH
 find_package(PDSH)
 
+# CUDA
+find_package(CUDA REQUIRED)
+include_directories("${CUDA_INCLUDE_DIRS}")
+
 # -----------------------------------------------------------------------------------
 add_subdirectory(scripts)
 

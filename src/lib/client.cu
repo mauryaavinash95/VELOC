@@ -127,7 +127,6 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
 	size_t regions_size = ckpt_regions.size();
     f.write((char *)&regions_size, sizeof(size_t));
     cudaPointerAttributes attributes;
-    TIMER_STOP(io_timer);
 	for (auto &e : ckpt_regions) {
 	    f.write((char *)&(e.first), sizeof(int));
         f.write((char *)&(e.second.second), sizeof(size_t));
@@ -146,7 +145,6 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
     cudaDeviceSynchronize();
     for (auto &e : ckpt_regions)
         f.write((char *)e.second.first, e.second.second);
-    TIMER_STOP(io_timer, "transferred " << source << " to " << dest);
     } catch (std::ofstream::failure &f) {
 	ERROR("cannot write to checkpoint file: " << current_ckpt << ", reason: " << f.what());
 	return false;
