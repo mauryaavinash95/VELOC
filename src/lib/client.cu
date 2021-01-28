@@ -64,6 +64,7 @@ veloc_client_t::veloc_client_t(MPI_Comm c, const char *cfg_file) :
 veloc_client_t::~veloc_client_t() {
     delete queue;
     delete modules;
+    cudaStreamDestroy(veloc_stream);
     DBG("VELOC finalized");
 }
 
@@ -159,8 +160,8 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
         return false;
     }
 
-    double gpu_cache = std::stod(current_ckpt.filename(cfg.get("gpu_cache_size")));
-    double rem_gpu_cache = (1<<30)*gpu_cache;
+    float gpu_cache = std::stof(current_ckpt.filename(cfg.get("gpu_cache_size")));
+    float rem_gpu_cache = (1<<30)*gpu_cache;
     DBG("Allowed " << rem_gpu_cache << " GPU cache size.");
 
     async_gpu_regions.clear();
@@ -182,14 +183,13 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
         cudaPointerGetAttributes (&attributes, ptr);
         if(attributes.type==cudaMemoryTypeDevice) {
             cudaMemGetInfo(&free_gpu_mem, &total_gpu_mem);
-            char *new_ptr;
             if(free_gpu_mem >= sz && rem_gpu_cache >= sz) {
+                char *new_ptr = (char *)ptr;
                 if(flags == DEFAULT) {
                     cudaMalloc((void**)&new_ptr, sz);
                     cudaMemcpy(new_ptr, ptr, sz, cudaMemcpyDeviceToDevice);
                     temp_dev_ptrs.push_back(new_ptr);
-                } else 
-                    new_ptr = (char *)ptr;
+                }
                 rem_gpu_cache -= sz;
                 std::get<0>(e.second) = new_ptr;
                 std::unique_lock<std::mutex> lock(gpu_memcpy_mutex);
@@ -198,7 +198,7 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
             } else {
                 char *temp;
                 cudaMallocHost((void**)&temp, sz);
-                cudaMemcpy(temp, new_ptr, sz, cudaMemcpyDeviceToHost);
+                cudaMemcpy(temp, ptr, sz, cudaMemcpyDeviceToHost);
                 temp_host_ptrs.push_back(temp);
                 std::get<0>(ckpt_regions[e.first]) = temp;    
             }
