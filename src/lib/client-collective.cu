@@ -39,8 +39,6 @@ veloc_client_t::veloc_client_t(unsigned int id, const char *cfg_file) :
     }
     ec_active = run_blocking(command_t(rank, command_t::INIT, 0, "")) > 0;
     cudaStreamCreate(&veloc_stream);
-    gpu_memcpy_thread = std::thread([&] { checkpoint_gpu_mem(); });
-    gpu_memcpy_thread.detach();
     DBG("VELOC initialized");
 }
 
@@ -56,8 +54,6 @@ veloc_client_t::veloc_client_t(MPI_Comm c, const char *cfg_file) :
     }
     ec_active = run_blocking(command_t(rank, command_t::INIT, 0, "")) > 0;
     cudaStreamCreate(&veloc_stream);
-    gpu_memcpy_thread = std::thread([&] { checkpoint_gpu_mem(); });
-    gpu_memcpy_thread.detach();
     DBG("VELOC initialized");
 }
 
@@ -101,37 +97,22 @@ bool veloc_client_t::checkpoint_begin(const char *name, int version) {
     DBG("called checkpoint_begin");
     current_ckpt = command_t(rank, command_t::CHECKPOINT, version, name);
     checkpoint_in_progress = true;
-    ckpt_check_done = false;
     TIMER_STOP(io_timer_ckpt_begin, " --- CKPT BEGIN TIME --- ");
     return true;
 }
 
-bool veloc_client_t::checkpoint_gpu_mem() {
+bool veloc_client_t::checkpoint_gpu_mem(regions_t async_gpu_regions) {
     void *ptr; size_t sz;
-    regions_t async_gpu_regions;    
-    do {
-        std::unique_lock<std::mutex> lock(gpu_memcpy_mutex);
-        while (gpu_memcpy_regions.empty()){
-            gpu_memcpy_cv.wait(lock, [&](){ return !gpu_memcpy_regions.empty(); }); 
-        }
-        while (!gpu_memcpy_regions.empty()) {
-            std::unique_lock<std::mutex> ul(gpu_memcpy_done_mutex);
-            gpu_memcpy_done = false;
-            auto e = gpu_memcpy_regions.begin();
-            char *temp;
-            ptr = std::get<0>(e->second);
-            sz = std::get<1>(e->second);
-            cudaMallocHost((void**)&temp, sz);
-            cudaMemcpyAsync(temp, ptr, sz, cudaMemcpyDeviceToHost, veloc_stream);
-            async_gpu_regions[e->first] = e->second;
-            gpu_memcpy_regions.erase(e);
-        }
-    } while (!ckpt_check_done);
+    for(auto &e: async_gpu_regions) {
+        char *temp;
+        ptr = std::get<0>(e.second);
+        sz = std::get<1>(e.second);
+        cudaMallocHost((void**)&temp, sz);
+        cudaMemcpyAsync(temp, ptr, sz, cudaMemcpyDeviceToHost, veloc_stream);
+        std::get<0>(async_gpu_regions[e.first]) = temp;
+    }
     cudaStreamSynchronize(veloc_stream);
-    bool ret = mem_write(async_gpu_regions);
-    gpu_memcpy_done = true;
-    gpu_memcpy_done_cv.notify_one();
-    return ret;
+    return mem_write(async_gpu_regions);
 }
 
 bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
@@ -184,10 +165,8 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
                 } else 
                     new_ptr = (char *)ptr;
                 rem_gpu_cache -= sz;
-                std::get<0>(e.second) = new_ptr;
-                std::unique_lock<std::mutex> lock(gpu_memcpy_mutex);
-                gpu_memcpy_regions.insert(e);
-                gpu_memcpy_cv.notify_one();
+                async_gpu_regions[e.first] = std::make_tuple(new_ptr, sz, flags, release_routine);
+                continue;
             } else {
                 char *temp;
                 cudaMallocHost((void**)&temp, sz);
@@ -197,23 +176,21 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
             }
         }
     }
-    ckpt_check_done = true;
 
     for (auto &e : async_gpu_regions)
         ckpt_regions.erase(e.first);
 
+    TIMER_START(io_timer_ckpt_gpu_mem);
+    gpu_memcpy_thread = std::thread([&] { mem_write(async_gpu_regions); });
     TIMER_START(io_timer_ckpt_host_mem);
     bool ret = mem_write(ckpt_regions);
     TIMER_STOP(io_timer_ckpt_host_mem, " --- CKPT HOST MEM TIME --- ");
+    gpu_memcpy_thread.join();
+    TIMER_STOP(io_timer_ckpt_gpu_mem, " --- CKPT GPU MEM TIME --- ");
 
     for (char *t : temp_ptrs)
         cudaFreeHost(t);
 
-    std::unique_lock<std::mutex> lock(gpu_memcpy_done_mutex);
-    while(!gpu_memcpy_done) {
-        gpu_memcpy_done_cv.wait(lock, [&](){ return gpu_memcpy_done; } );
-    }
-    
     TIMER_STOP(io_timer_ckpt_mem, " --- CKPT MEM TIME --- ");
     return ret;
 }

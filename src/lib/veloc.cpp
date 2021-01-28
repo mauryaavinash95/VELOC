@@ -34,8 +34,8 @@ extern "C" int VELOC_Init_single(unsigned int id, const char *cfg_file) {
 
 #define CLIENT_CALL(x) (veloc_client != NULL && (x)) ? VELOC_SUCCESS : VELOC_FAILURE;
 
-extern "C" int VELOC_Mem_protect(int id, void *ptr, size_t count, size_t base_size) {
-    return CLIENT_CALL(veloc_client->mem_protect(id, ptr, count, base_size));
+extern "C" int VELOC_Mem_protect(int id, void *ptr, size_t count, size_t base_size, unsigned int flags, release release_routine) {
+    return CLIENT_CALL(veloc_client->mem_protect(id, ptr, count, base_size, flags, release_routine));
 }
 
 extern "C" int VELOC_Mem_unprotect(int id) {
@@ -123,21 +123,6 @@ extern "C" int VELOC_Checkpoint(const char *name, int version) {
 	ret = VELOC_Checkpoint_end(1);
     return ret;
 }
-
-// extern "C" int VELOC_GPU_Async_Checkpoint(const char *name, int version, int mem_prot_id, void *d_ptr, void *h_ptr, size_t count, size_t base_size) {
-//     int ret = VELOC_Checkpoint_wait();
-//     int ids[] = {mem_prot_id};
-//     if (ret == VELOC_SUCCESS)
-//     cudaMemcpy(h_ptr, d_ptr, count*base_size, cudaMemcpyDeviceToHost);
-//     ret = VELOC_Mem_protect(mem_prot_id, h_ptr, count, base_size);
-//     if (ret == VELOC_SUCCESS)
-// 	ret = VELOC_Checkpoint_begin(name, version);
-//     if (ret == VELOC_SUCCESS)
-// 	ret = VELOC_Checkpoint_selective(VELOC_CKPT_SOME, ids, 1);
-//     if (ret == VELOC_SUCCESS)
-// 	ret = VELOC_Checkpoint_end(1);
-//     return ret;
-// }
 
 extern "C" int VELOC_Finalize(int drain) {
     if (veloc_client != NULL) {

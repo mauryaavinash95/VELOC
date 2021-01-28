@@ -28,6 +28,10 @@
 #define VELOC_CKPT_SOME (1)
 #define VELOC_CKPT_REST (2)
 
+#define DEFAULT (1)
+#define READ_ONLY (2)
+typedef int (*release)();
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -73,7 +77,7 @@ int VELOC_Finalize(int cleanup);
 //   IN ptr       - pointer to start of memory region
 //   IN count     - number of consecutive elements in memory region
 //   IN base_size - size of each element in memory region
-int VELOC_Mem_protect(int id, void *ptr, size_t count, size_t base_size);
+int VELOC_Mem_protect(int id, void *ptr, size_t count, size_t base_size, unsigned int flags = 0, release release_routine = NULL);
 
 // unregisters a memory region
 //   IN id        - application defined integer label for memory region
