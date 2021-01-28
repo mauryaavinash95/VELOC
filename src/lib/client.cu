@@ -123,6 +123,7 @@ bool veloc_client_t::checkpoint_gpu_mem() {
             sz = std::get<1>(e->second);
             cudaMallocHost((void**)&temp, sz);
             cudaMemcpyAsync(temp, ptr, sz, cudaMemcpyDeviceToHost, veloc_stream);
+            temp_host_ptrs.push_back(temp);
             async_gpu_regions[e->first] = e->second;
             gpu_memcpy_regions.erase(e);
         }
@@ -163,11 +164,18 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
     double gpu_cache = std::stod(current_ckpt.filename(cfg.get("gpu_cache_size")));
     double rem_gpu_cache = (1<<30)*gpu_cache;
     DBG("Allowed " << rem_gpu_cache << " GPU cache size.");
+
     regions_t async_gpu_regions;
     cudaPointerAttributes attributes;
-    void *ptr; size_t sz; unsigned int flags=0; release release_routine=NULL;
-    std::vector<char *> temp_ptrs;
+    void *ptr; size_t sz; unsigned int flags=0; release release_routine=NULL;    
     size_t free_gpu_mem, total_gpu_mem;
+
+    // In this loop, we check for the GPU memory transfer conditions,
+    // If gpu_cache_space is available, we either make a copy or start
+    // async ckpt of the original dev pointer - We add in gpu_memory_regions 
+    // and notify the thread 
+    // Else, if gpu_cache_space is unavailable, we perform blocking transfer from
+    // the device to host memory.
     for (auto &e : ckpt_regions) {
         ptr = std::get<0>(e.second);
         sz = std::get<1>(e.second);
@@ -181,6 +189,7 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
                 if(flags == DEFAULT) {
                     cudaMalloc((void**)&new_ptr, sz);
                     cudaMemcpy(new_ptr, ptr, sz, cudaMemcpyDeviceToDevice);
+                    temp_dev_ptrs.push_back(new_ptr);
                 } else 
                     new_ptr = (char *)ptr;
                 rem_gpu_cache -= sz;
@@ -192,28 +201,36 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
                 char *temp;
                 cudaMallocHost((void**)&temp, sz);
                 cudaMemcpy(temp, new_ptr, sz, cudaMemcpyDeviceToHost);
-                temp_ptrs.push_back(temp);
-                ckpt_regions[e.first] = std::make_tuple(temp, sz, flags, release_routine);    
+                temp_host_ptrs.push_back(temp);
+                std::get<0>(ckpt_regions[e.first]) = temp;    
             }
         }
     }
     ckpt_check_done = true;
 
+    // Remove the regions to be checkpointed from the GPU async from the ckpt_regions list
     for (auto &e : async_gpu_regions)
         ckpt_regions.erase(e.first);
+
+    // Wait for the GPU async ckpt method to flush to file first.
+    std::unique_lock<std::mutex> lock(gpu_memcpy_done_mutex);
+    while(!gpu_memcpy_done) {
+        gpu_memcpy_done_cv.wait(lock, [&](){ return gpu_memcpy_done; } );
+    }
 
     TIMER_START(io_timer_ckpt_host_mem);
     bool ret = mem_write(ckpt_regions);
     TIMER_STOP(io_timer_ckpt_host_mem, " --- CKPT HOST MEM TIME --- ");
 
-    for (char *t : temp_ptrs)
+    for (char *t : temp_host_ptrs)
         cudaFreeHost(t);
-
-    std::unique_lock<std::mutex> lock(gpu_memcpy_done_mutex);
-    while(!gpu_memcpy_done) {
-        gpu_memcpy_done_cv.wait(lock, [&](){ return gpu_memcpy_done; } );
-    }
     
+    for (char *t : temp_dev_ptrs)
+        cudaFree(t);
+
+    temp_host_ptrs.clear();
+    temp_dev_ptrs.clear();
+
     TIMER_STOP(io_timer_ckpt_mem, " --- CKPT MEM TIME --- ");
     return ret;
 }

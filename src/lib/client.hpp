@@ -37,7 +37,8 @@ class veloc_client_t {
     bool gpu_memcpy_done = true;
     std::mutex gpu_memcpy_done_mutex;
     std::condition_variable gpu_memcpy_done_cv;
-    
+    std::vector<char *> temp_host_ptrs;
+    std::vector<char *> temp_dev_ptrs;
 
     std::map<int, size_t> region_info;
     size_t header_size = 0;
