@@ -107,8 +107,7 @@ bool veloc_client_t::checkpoint_begin(const char *name, int version) {
 }
 
 bool veloc_client_t::checkpoint_gpu_mem() {
-    void *ptr; size_t sz;
-    regions_t async_gpu_regions;    
+    void *ptr; size_t sz; 
     do {
         std::unique_lock<std::mutex> lock(gpu_memcpy_mutex);
         while (gpu_memcpy_regions.empty()){
@@ -129,10 +128,9 @@ bool veloc_client_t::checkpoint_gpu_mem() {
         }
     } while (!ckpt_check_done);
     cudaStreamSynchronize(veloc_stream);
-    bool ret = mem_write(async_gpu_regions);
     gpu_memcpy_done = true;
     gpu_memcpy_done_cv.notify_one();
-    return ret;
+    return true;
 }
 
 bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
@@ -165,7 +163,7 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
     double rem_gpu_cache = (1<<30)*gpu_cache;
     DBG("Allowed " << rem_gpu_cache << " GPU cache size.");
 
-    regions_t async_gpu_regions;
+    async_gpu_regions.clear();
     cudaPointerAttributes attributes;
     void *ptr; size_t sz; unsigned int flags=0; release release_routine=NULL;    
     size_t free_gpu_mem, total_gpu_mem;
@@ -208,15 +206,15 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
     }
     ckpt_check_done = true;
 
-    // Remove the regions to be checkpointed from the GPU async from the ckpt_regions list
-    for (auto &e : async_gpu_regions)
-        ckpt_regions.erase(e.first);
-
     // Wait for the GPU async ckpt method to flush to file first.
     std::unique_lock<std::mutex> lock(gpu_memcpy_done_mutex);
     while(!gpu_memcpy_done) {
         gpu_memcpy_done_cv.wait(lock, [&](){ return gpu_memcpy_done; } );
     }
+
+    // Edit the regions to be checkpointed from the GPU async from the ckpt_regions list
+    for (auto &e : async_gpu_regions)
+        std::get<0>(ckpt_regions[e.first]) = std::get<0>(e.second);
 
     TIMER_START(io_timer_ckpt_host_mem);
     bool ret = mem_write(ckpt_regions);
@@ -246,7 +244,7 @@ bool veloc_client_t::mem_write(regions_t ckpt_regions) {
             f.write((char *)&(e.first), sizeof(int));
             f.write((char *)&(std::get<1>(e.second)), sizeof(size_t));
         }  
-
+        
         for (auto &e : ckpt_regions)
             f.write((char *)std::get<0>(e.second), std::get<1>(e.second));
     } catch (std::ofstream::failure &f) {

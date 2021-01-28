@@ -28,6 +28,7 @@ class veloc_client_t {
     cudaStream_t veloc_stream;
     
     regions_t gpu_memcpy_regions;
+    regions_t async_gpu_regions;
     bool ckpt_check_done = true;
     std::mutex gpu_memcpy_mutex;
     std::condition_variable gpu_memcpy_cv;
