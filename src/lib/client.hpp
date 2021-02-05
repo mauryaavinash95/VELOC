@@ -12,6 +12,9 @@
 #include <map>
 #include <set>
 #include <deque>
+#include <queue> 
+#include <string>
+#include <fstream>
 
 class veloc_client_t {
     config_t cfg;
@@ -24,20 +27,36 @@ class veloc_client_t {
     typedef std::map<int, region_t> regions_t;
 
     regions_t mem_regions;
+    regions_t ckpt_regions;
     command_t current_ckpt;
     cudaStream_t veloc_stream;
-    
-    regions_t gpu_memcpy_regions;
-    regions_t async_gpu_regions;
+    bool checkpoint_in_progress = false;
     bool ckpt_check_done = true;
+
+    std::string ckpt_filename;
+
+    regions_t gpu_memcpy_regions;
+    std::queue<int> gpu_memcpy_queue;
+    std::vector<void *> gpu_memcpy_new_ptrs;
     std::mutex gpu_memcpy_mutex;
     std::condition_variable gpu_memcpy_cv;
     std::thread gpu_memcpy_thread;
-    bool checkpoint_in_progress = false;
     
+    float rem_gpu_cache = 0;
+    regions_t write_to_file_regions;
+    std::mutex write_to_file_mutex;
+    std::condition_variable write_to_file_cv;
+    std::thread write_to_file_thread;
+
+    std::pair<int, region_t> cu_cb_region;
+
     bool gpu_memcpy_done = true;
     std::mutex gpu_memcpy_done_mutex;
-    std::condition_variable gpu_memcpy_done_cv;
+    std::condition_variable gpu_memcpy_done_cv; 
+
+    bool veloc_client_active = true;
+    std::ofstream file_stream;  
+
     std::vector<char *> temp_host_ptrs;
     std::vector<char *> temp_dev_ptrs;
 
@@ -62,9 +81,10 @@ public:
     bool checkpoint_mem(int mode, std::set<int> &ids);
     bool checkpoint_end(bool success);
     bool checkpoint_wait();
-    // bool checkpoint_gpu_mem(regions_t async_gpu_regions);
-    bool checkpoint_gpu_mem();
-    bool mem_write(regions_t ckpt_regions);
+    static void CUDART_CB enqueue_write(cudaStream_t stream, cudaError_t status, void *data); 
+    bool gpu_to_host_trf();
+    bool mem_to_file_write();
+    bool write_headers(regions_t ckpt_regions);
     int restart_test(const char *name, int version);
     bool restart_begin(const char *name, int version);
     size_t recover_size(int id);
