@@ -33,9 +33,8 @@ class veloc_client_t {
     bool checkpoint_in_progress = false;
     bool ckpt_check_done = true;
 
-    std::string ckpt_filename;
-
-    regions_t gpu_memcpy_regions;
+    // regions_t gpu_memcpy_regions;
+    std::queue<int> gpu_memcpy_region_ids;
     std::queue<int> gpu_memcpy_queue;
     std::vector<void *> gpu_memcpy_new_ptrs;
     std::mutex gpu_memcpy_mutex;
@@ -43,12 +42,11 @@ class veloc_client_t {
     std::thread gpu_memcpy_thread;
     
     float rem_gpu_cache = 0;
+    float rem_host_cache = 0;
     regions_t write_to_file_regions;
     std::mutex write_to_file_mutex;
     std::condition_variable write_to_file_cv;
     std::thread write_to_file_thread;
-
-    std::pair<int, region_t> cu_cb_region;
 
     bool gpu_memcpy_done = true;
     std::mutex gpu_memcpy_done_mutex;
