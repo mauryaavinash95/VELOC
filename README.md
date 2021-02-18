@@ -13,6 +13,20 @@ VeloC is a collaboration between Argonne National Laboratory and
 Lawrence Livermore National Laboratory as part of the Exascale 
 Computing Project.
 
+## VELOC-GPU
+The VELOC-GPU project is an experimental prototype for enabling checkpoint/restart
+support on NVidia GPUs. The parent VELOC source is available at: https://github.com/ECP-VeloC/VELOC
+and the VELOC-GPU source is available at: https://github.com/ECP-VeloC/gpu-enabled.
+
+To run VELOC with GPU support, perform the following steps:
+1. git clone https://github.com/ECP-VeloC/VELOC.git
+2. git clone https://github.com/ECP-VeloC/gpu-enabled.git  # Private repository
+3. cp -r gpu-enabled/src/lib/* VELOC/src/lib/
+4. cp gpu-enabled/CMakeLists.txt VELOC/CMakeLists.txt
+5. cd gpu-enabled
+6. ./bootstrap.sh
+7. ./auto-install.py <install_dir>
+
 ## Documentation
 
 The documentation of VeloC is available here: http://veloc.rtfd.io
@@ -25,10 +39,6 @@ to use VeloC on your system.
 In case of questions and comments or help, please contact the VeloC team at 
 veloc-users@lists.mcs.anl.gov
 
-## Build Status
-The current Travis status of the VeloC master branch is:
-
-[![Build Status](https://api.travis-ci.com/ECP-VeloC/VELOC.png)](https://travis-ci.com/ECP-VeloC/VELOC)
 
 ## Release
 

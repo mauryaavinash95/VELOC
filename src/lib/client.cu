@@ -86,12 +86,17 @@ bool veloc_client_t::mem_unprotect(int id) {
 
 bool veloc_client_t::checkpoint_wait() {
     if (cfg.is_sync())
-	return true;
-    if (checkpoint_in_progress) {
-	ERROR("need to finalize local checkpoint first by calling checkpoint_end()");
-	return false;
+	    return true;
+    std::unique_lock<std::mutex> lock(ckpt_writes_done_mutex);
+    while(!ckpt_writes_done) {
+        ckpt_writes_done_cv.wait(lock, [&](){ return ckpt_writes_done; }); 
     }
-    return queue->wait_completion() == VELOC_SUCCESS;
+    if (checkpoint_in_progress) {
+        ERROR("need to finalize local checkpoint first by calling checkpoint_end()");
+        return false;
+    }
+    
+    return queue->wait_completion() == VELOC_SUCCESS; 
 }
 
 bool veloc_client_t::checkpoint_begin(const char *name, int version) {
@@ -120,16 +125,19 @@ bool veloc_client_t::checkpoint_begin(const char *name, int version) {
 
 void CUDART_CB veloc_client_t::enqueue_write(cudaStream_t stream, cudaError_t status, void *data) {
     veloc_client_t *th = (veloc_client_t *)data;
-    int id = th->gpu_memcpy_queue.front();
-    th->gpu_memcpy_queue.pop();
+    std::unique_lock<std::mutex> gpu_trf_lock(th->gpu_trf_mutex);
+    while (th->gpu_trf_queue.empty()){
+        th->gpu_trf_cv.wait(gpu_trf_lock, [&](){ return !th->gpu_trf_queue.empty(); }); 
+    }
+    int id = th->gpu_trf_queue.front();
     std::pair<int, region_t> t = std::make_pair(id, th->ckpt_regions[id]);
-    DBG("GPU ->Host Memcpy done for " << t.first << " now starting to write to file.");
-    th->rem_gpu_cache += std::get<1>(t.second);
+    DBG("GPU ->Host Memcpy done for " << t.first << ", now starting to write to file.");
     release release_routine = std::get<3>(t.second); 
     // TODO: Call the release_routine function from here....
     std::unique_lock<std::mutex> write_queue_lock(th->write_to_file_mutex);
     th->write_to_file_regions.insert(t);
     th->write_to_file_cv.notify_one();
+    th->gpu_trf_queue.pop();
 }
 
 bool veloc_client_t::gpu_to_host_trf() {
@@ -149,16 +157,25 @@ bool veloc_client_t::gpu_to_host_trf() {
             lock.unlock();
             while (!local_gpu_memcpy_region_ids.empty()) {
                 std::pair<int, region_t> e = local_gpu_memcpy_region_ids.front();
-                local_gpu_memcpy_region_ids.pop();
-                DBG("GPU memcpying region "<< e.first);
                 char *temp;
                 ptr = std::get<0>(e.second);
                 sz = std::get<1>(e.second);
+                std::unique_lock<std::mutex> host_cache_lock(host_cache_mutex);
+                while(rem_host_cache < sz) {
+                    host_cache_cv.wait(host_cache_lock, [&](){ return rem_host_cache >= sz; });
+                }
+                rem_host_cache -= sz;
+                host_cache_cv.notify_all();
+                host_cache_lock.unlock();
                 cudaMallocHost((void**)&temp, sz);
                 std::get<0>(ckpt_regions[e.first]) = temp;
                 cudaMemcpyAsync(temp, ptr, sz, cudaMemcpyDeviceToHost, veloc_stream);
-                gpu_memcpy_queue.push(e.first);
+                std::unique_lock<std::mutex> gpu_trf_lock(gpu_trf_mutex);
+                gpu_trf_queue.push(e.first);
+                gpu_trf_cv.notify_one();
+                gpu_trf_lock.unlock();
                 cudaStreamAddCallback(veloc_stream, veloc_client_t::enqueue_write, this, 0);
+                local_gpu_memcpy_region_ids.pop();
                 temp_host_ptrs.push_back(temp);
             }
         } while (!ckpt_check_done);
@@ -192,11 +209,21 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
         ERROR("empty selection of memory regions to checkpoint, please check protection and/or selective checkpointing primitives");
         return false;
     }
+    
+    to_write_regions = ckpt_regions.size();
+    std::unique_lock<std::mutex> ckpt_writes_lock(ckpt_writes_done_mutex);
+    ckpt_writes_done = false;
+    ckpt_writes_lock.unlock();
 
     float host_cache = std::stof(current_ckpt.filename(cfg.get("host_cache_size")));
     float gpu_cache = std::stof(current_ckpt.filename(cfg.get("gpu_cache_size")));
+    size_t free_gpu_memory, total_gpu_memory;
+    cudaMemGetInfo(&free_gpu_memory, &total_gpu_memory);
     rem_gpu_cache = (1<<30)*gpu_cache;
     rem_host_cache = (1<<30)*host_cache;
+    // Need to explicitly check if enough free memory 
+    // is available on the GPU for cache.
+    rem_gpu_cache = free_gpu_memory >= rem_gpu_cache ? rem_gpu_cache : free_gpu_memory;
 
     cudaPointerAttributes attributes;
     void *ptr; size_t sz;    
@@ -205,7 +232,7 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
     for (auto &e : ckpt_regions) {
         sz = std::get<1>(e.second);
         if (sz > rem_host_cache) {
-            ERROR("Please increase the host size to checkpoint region " << e.first);
+            ERROR("Please increase the host cache size to checkpoint region: " << e.first);
             return false;
         }
     }
@@ -216,15 +243,21 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
         flags = std::get<2>(e.second);
         cudaPointerGetAttributes (&attributes, ptr);
         if(attributes.type==cudaMemoryTypeDevice) {
-            if(rem_gpu_cache >= sz) {
+            std::unique_lock<std::mutex> gpu_cache_lock(gpu_cache_mutex);  // Used for atomic access of rem_gpu_cache.
+            if (flags == READ_ONLY) {
+                DBG("Sending read-only region for GPU -> Host copy, region: " << e.first);
+                std::get<0>(e.second) = (char *)ptr;
+                std::unique_lock<std::mutex> lock(gpu_memcpy_mutex);
+                gpu_memcpy_region_ids.push(e.first);
+                gpu_memcpy_cv.notify_one();
+            } else if(rem_gpu_cache >= sz && flags == DEFAULT) {
                 char *new_ptr = (char *)ptr;
-                if(flags == DEFAULT) {
-                    cudaMalloc((void**)&new_ptr, sz);
-                    rem_gpu_cache -= sz;
-                    DBG("Creating a copy on GPU cache for region " << e.first);
-                    cudaMemcpy(new_ptr, ptr, sz, cudaMemcpyDeviceToDevice);
-                    temp_dev_ptrs.push_back(new_ptr);
-                }
+                cudaMalloc((void**)&new_ptr, sz);
+                rem_gpu_cache -= sz;
+                gpu_cache_lock.unlock();
+                DBG("Creating a copy on GPU cache for region " << e.first);
+                cudaMemcpy(new_ptr, ptr, sz, cudaMemcpyDeviceToDevice);
+                temp_dev_ptrs.push_back(new_ptr);
                 std::get<0>(e.second) = new_ptr;
                 std::unique_lock<std::mutex> lock(gpu_memcpy_mutex);
                 gpu_memcpy_region_ids.push(e.first);
@@ -232,8 +265,18 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
             } else {
                 DBG("Not enough free cache on GPU for region " << e.first);
                 char *temp;
+                // Lock used for atomic access of rem_host_cache and wait if host_cache is unavailable.
+                std::unique_lock<std::mutex> host_cache_lock(host_cache_mutex); 
+                while(rem_host_cache < sz) {
+                    host_cache_cv.wait(host_cache_lock, [&](){ return rem_host_cache >= sz; });
+                }
+                rem_host_cache -= sz;
+                host_cache_cv.notify_all();
+                host_cache_lock.unlock();
+                TIMER_START(blocking_memcpy)
                 cudaMallocHost((void**)&temp, sz);
                 cudaMemcpy(temp, ptr, sz, cudaMemcpyDeviceToHost);
+                TIMER_STOP(blocking_memcpy, "----- Blocking copy from GPU -> host for region: " << e.first);
                 std::get<0>(e.second) = temp; 
                 temp_host_ptrs.push_back(temp);  
                 std::unique_lock<std::mutex> write_queue_lock(write_to_file_mutex);
@@ -241,7 +284,7 @@ bool veloc_client_t::checkpoint_mem(int mode, std::set<int> &ids) {
                 write_to_file_cv.notify_one();
             }
         } else {
-            DBG("Direct host to file transfer for region " << e.first);
+            DBG("Sending host resident region " << e.first << " to filestream." );
             std::unique_lock<std::mutex> write_queue_lock(write_to_file_mutex);
             write_to_file_regions.insert(e);
             write_to_file_cv.notify_one();
@@ -268,7 +311,7 @@ bool veloc_client_t::mem_to_file_write() {
             do {
                 std::unique_lock<std::mutex> lock(write_to_file_mutex);
                 while (write_to_file_regions.empty()){
-                    write_to_file_cv.wait(lock, [&](){ return (!write_to_file_regions.empty() || ckpt_check_done); }); 
+                    write_to_file_cv.wait(lock, [&](){ return (!write_to_file_regions.empty() || (write_to_file_regions.empty() && gpu_trf_queue.empty() && ckpt_check_done)); });
                 }
                 while (!write_to_file_regions.empty()) {
                     is_writing = true;
@@ -276,17 +319,41 @@ bool veloc_client_t::mem_to_file_write() {
                     local_write_regions.push(e);
                     write_to_file_regions.erase(e.first);
                 }
+                lock.unlock();
                 while (!local_write_regions.empty()) {
                     auto e = local_write_regions.front();
                     local_write_regions.pop();
-                    int d = std::distance(ckpt_regions.begin(), ckpt_regions.find(e.first));
-                    int offset = d + sizeof(size_t) + ckpt_regions.size()*(sizeof(size_t)+sizeof(int));
+                    std::map<int, region_t>::iterator it, pos;
+
+                    TIMER_START(file_write)
+                    // We cannot call CUDA APIs in the enqueue_write
+                    // CUDA callback, hence releasing GPU cache memory here.
+                    if (std::find(temp_dev_ptrs.begin(), temp_dev_ptrs.end(), (char *)std::get<0>(e.second))!=temp_dev_ptrs.end()) {
+                        cudaFree(std::get<0>(e.second));
+                        std::unique_lock<std::mutex> gpu_cache_lock(gpu_cache_mutex);
+                        rem_gpu_cache += std::get<1>(e.second);
+                    }
+
+                    pos = ckpt_regions.find(e.first);
+                    unsigned long long int offset = sizeof(size_t) + ckpt_regions.size()*(sizeof(size_t)+sizeof(int));
+                    for(it = ckpt_regions.begin(); it!=pos; ++it)
+                        offset += std::get<1>(it->second);
+                    
                     file_stream.seekp(offset);
-                    DBG("Starting to write region " << e.first << " at offset: " << offset << " for " << (std::get<0>(e.second)) << " sz: " << std::get<1>(e.second));
-                    file_stream.write((char *)&(std::get<0>(e.second)), std::get<1>(e.second));
-                    DBG("f.write completed...");
+                    file_stream.write((char *)std::get<0>(e.second), std::get<1>(e.second));
+
+                    // Release host cache if allocated
+                    if(std::find(temp_dev_ptrs.begin(), temp_dev_ptrs.end(), (char *)std::get<0>(e.second))!=temp_host_ptrs.end()) {
+                        cudaFreeHost(std::get<0>(e.second));
+                        std::unique_lock<std::mutex> host_cache_lock(host_cache_mutex);
+                        rem_host_cache += std::get<1>(e.second);
+                        host_cache_cv.notify_all();
+                    } 
+
+                    TIMER_STOP(file_write, " ----- File write completed for region: " << e.first);
+                    to_write_regions--;
                 }
-            } while (!ckpt_check_done || !write_to_file_regions.empty());
+            } while (to_write_regions > 0);
             if(is_writing) {
                 // Write headers
                 file_stream.seekp(0);
@@ -297,23 +364,28 @@ bool veloc_client_t::mem_to_file_write() {
                     file_stream.write((char *)&(std::get<1>(e.second)), sizeof(size_t));
                 }  
                 file_stream.close();
-                DBG("DONE writing all regions to scratch!");
-                for (char *t : temp_host_ptrs)
-                    cudaFreeHost(t);
-                for (char *t : temp_dev_ptrs)
-                    cudaFree(t);
+                DBG("DONE writing all regions to scratch! "); 
+                // DBG("ckpt_check_done: "ckpt_check_done << " write-regions: " << write_to_file_regions.size() << ", gpu_trf queue: " << gpu_trf_queue.size()
+                //     << " gpu_memcpy_region_ids: ", gpu_memcpy_region_ids.size()
+                // );
+                is_writing = false;
+                checkpoint_in_progress = false;
+                std::unique_lock<std::mutex> lock(ckpt_writes_done_mutex);
+                ckpt_writes_done = true;
+                ckpt_writes_done_cv.notify_one();
                 temp_host_ptrs.clear();
                 temp_dev_ptrs.clear();
-                is_writing = false;
             }
         } catch (std::ofstream::failure &f) {
             ERROR("cannot write to checkpoint file: " << current_ckpt << ", reason: " << f.what());
+            file_stream.close();
             for (char *t : temp_host_ptrs)
                 cudaFreeHost(t);
             for (char *t : temp_dev_ptrs)
                 cudaFree(t);
             temp_host_ptrs.clear();
             temp_dev_ptrs.clear();
+            checkpoint_in_progress = false;
             return false;
         }
     }
@@ -322,7 +394,7 @@ bool veloc_client_t::mem_to_file_write() {
 
 bool veloc_client_t::checkpoint_end(bool /*success*/) {
     TIMER_START(io_timer_ckpt_end);
-    checkpoint_in_progress = false;
+    // checkpoint_in_progress = false;
     if (cfg.is_sync()) {
         TIMER_STOP(io_timer_ckpt_end, " --- CKPT END TIME --- ");
         return modules->notify_command(current_ckpt) == VELOC_SUCCESS;
